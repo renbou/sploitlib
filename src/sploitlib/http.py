@@ -20,7 +20,9 @@ class RequestsSession(BaseUrlSession):
     :param base_url: The base URL to use for all requests.
     :param per_request_conn: Whether to use per-request connections,
         which automatically close after the request has completed.
-        Note that streaming requests are not supported.
+        The "Connection" header is set to None on the session instance,
+        meaning it will not be sent. If instead "close" should be sent,
+        override the "Connection" header on the headers property manually.
     """
 
     def __init__(self, base_url: Optional[str] = None, per_request_conn: bool = False):
