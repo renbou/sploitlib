@@ -1,5 +1,3 @@
-__all__ = ["add_one"]
+from .http import RequestsSession
 
-
-def add_one(number: int) -> int:
-    return number + 1
+__all__ = ["RequestsSession"]
