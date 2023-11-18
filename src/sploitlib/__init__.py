@@ -1,4 +1,11 @@
-from .http import RequestsSession, UserAgent
-from .config import sploitcfg
+from .config import Config, default, sploitcfg
+from .http import CacheProxySession, RequestsSession, UserAgent
 
-__all__ = ["RequestsSession", "UserAgent", "sploitcfg"]
+__all__ = [
+    "Config",
+    "default",
+    "sploitcfg",
+    "CacheProxySession",
+    "RequestsSession",
+    "UserAgent",
+]
