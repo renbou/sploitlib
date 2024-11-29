@@ -1,3 +1,5 @@
+import queue
+import random
 import warnings
 from typing import Callable, Optional
 
@@ -20,7 +22,7 @@ class UserAgent:
     """
 
     @staticmethod
-    def none() -> Optional[str]:
+    def default() -> Optional[str]:
         """
         User Agent configuration which always return `urllib3.util.SKIP_HEADER`,
         meaning that no user agent will be sent.
@@ -28,12 +30,12 @@ class UserAgent:
         return SKIP_HEADER
 
     @staticmethod
-    def default() -> Optional[str]:
+    def requests(version: str = requests.__version__) -> Optional[str]:
         """
-        User Agent configuration which returns the default
-        python-requests/version user agent string.
+        User Agent configuration which returns a python-requests/version
+        user agent string with the given or default version value.
         """
-        return UserAgentBuilder("python-requests", requests.__version__).build()
+        return UserAgentBuilder("python-requests", version).build()
 
 
 class RequestsSession(BaseUrlSession):
@@ -58,16 +60,16 @@ class RequestsSession(BaseUrlSession):
     def __init__(
         self,
         base_url: Optional[str] = None,
-        per_request_conn: Optional[bool] = None,
+        round_robin_conns: Optional[int] = None,
         user_agent: Optional[Callable[[], Optional[str]]] = None,
     ):
         super().__init__(base_url=base_url)
 
-        if per_request_conn is None:
-            if sploitcfg.session_per_request_conn == default:
-                per_request_conn = False
+        if round_robin_conns is None:
+            if sploitcfg.session_round_robin_conns == default:
+                round_robin_conns = random.randint(2, 3)
             else:
-                per_request_conn = sploitcfg.session_per_request_conn
+                round_robin_conns = sploitcfg.session_round_robin_conns
 
         if user_agent is None:
             if sploitcfg.session_user_agent == default:
@@ -76,12 +78,16 @@ class RequestsSession(BaseUrlSession):
                 user_agent = sploitcfg.session_user_agent
 
         self.verify = False
-        self.per_request_conn = per_request_conn
+        self.round_robin_conns = round_robin_conns
         self.user_agent = user_agent
 
-        if per_request_conn:
-            self.mount("https://", PerRequestAdapter())
-            self.mount("http://", PerRequestAdapter())
+        if round_robin_conns > 1:
+            self.mount(
+                "https://", RoundRobinRequestAdapter(pool_maxsize=round_robin_conns)
+            )
+            self.mount(
+                "http://", RoundRobinRequestAdapter(pool_maxsize=round_robin_conns)
+            )
             self.headers["Connection"] = None
 
     def prepare_request(self, request: requests.Request, *args, **kwargs):
@@ -151,7 +157,7 @@ class CacheProxySession(requests.Session):
         self.verify = False
 
 
-class PerRequestAdapter(HTTPAdapter):
+class RoundRobinRequestAdapter(HTTPAdapter):
     """
     Overridden `HTTPAdapter` that users a `urllib3.PoolManager` with
     our custom connection pools, which always close the returned connections.
@@ -165,23 +171,18 @@ class PerRequestAdapter(HTTPAdapter):
             num_pools=connections,
             maxsize=maxsize,
             block=block,
-            strict=True,
             **pool_kwargs,
         )
 
         self.poolmanager.pool_classes_by_scheme = {
-            "http": PerRequestHTTPPool,
-            "https": PerRequestHTTPSPool,
+            "http": RoundRobinHTTPPool,
+            "https": RoundRobinHTTPSPool,
         }
 
 
-class PerRequestHTTPPool(HTTPConnectionPool):
-    def _put_conn(self, conn):
-        if conn:
-            conn.close()
+class RoundRobinHTTPPool(HTTPConnectionPool):
+    QueueCls = queue.Queue
 
 
-class PerRequestHTTPSPool(HTTPSConnectionPool):
-    def _put_conn(self, conn):
-        if conn:
-            conn.close()
+class RoundRobinHTTPSPool(HTTPSConnectionPool):
+    QueueCls = queue.Queue
