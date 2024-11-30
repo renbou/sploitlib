@@ -6,4 +6,4 @@ requires = ["setuptools>=75.0"]
 dependencies = ["requests >= 2.32.0", "requests-toolbelt >= 1.0.0"]
 name = "sploitlib"
 readme = "README.md"
-version = "0.1.1"
+version = "0.1.2"

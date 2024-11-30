@@ -1,5 +1,5 @@
 from .config import Config, default, sploitcfg
-from .http import CacheProxySession, RequestsSession, UserAgent
+from .http import CacheProxySession, RequestsSession, UserAgent, rstnofin
 
 __all__ = [
     "Config",
@@ -7,5 +7,6 @@ __all__ = [
     "sploitcfg",
     "CacheProxySession",
     "RequestsSession",
+    "rstnofin",
     "UserAgent",
 ]

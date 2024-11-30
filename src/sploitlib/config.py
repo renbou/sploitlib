@@ -16,6 +16,7 @@ default = Default()
 class Config:
     """SploitLib configuration class for setting various defaults."""
 
+    session_per_request_conns: Union[Default, bool] = default
     session_round_robin_conns: Union[Default, int] = default
     session_user_agent: Union[Default, Callable[[], Optional[str]]] = default
     cache_proxy_url: Optional[str] = None
@@ -24,6 +25,7 @@ class Config:
 
     def set(self, cfg: "Config"):
         """Set this config from another one."""
+        self.session_per_request_conns = cfg.session_per_request_conns
         self.session_round_robin_conns = cfg.session_round_robin_conns
         self.session_user_agent = cfg.session_user_agent
         self.cache_proxy_url = cfg.cache_proxy_url
