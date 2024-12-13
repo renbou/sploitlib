@@ -1,0 +1,271 @@
+import queue
+import random
+import warnings
+from typing import Callable, Optional
+
+import requests
+from requests.adapters import DEFAULT_POOLBLOCK, HTTPAdapter
+from requests_toolbelt.sessions import BaseUrlSession
+from requests_toolbelt.utils.user_agent import UserAgentBuilder
+from urllib3 import HTTPConnectionPool, HTTPSConnectionPool, PoolManager
+from urllib3.exceptions import InsecureRequestWarning
+from urllib3.util import SKIP_HEADER
+
+from .config import default, sploitcfg
+
+warnings.simplefilter("ignore", InsecureRequestWarning)
+
+
+class UserAgent:
+    """
+    Class containing common user agent configurations as static methods.
+    """
+
+    @staticmethod
+    def default() -> Optional[str]:
+        """
+        User Agent configuration which always return `urllib3.util.SKIP_HEADER`,
+        meaning that no user agent will be sent.
+        """
+        return SKIP_HEADER
+
+    @staticmethod
+    def requests(version: str = requests.__version__) -> Optional[str]:
+        """
+        User Agent configuration which returns a python-requests/version
+        user agent string with the given or default version value.
+        """
+        return UserAgentBuilder("python-requests", version).build()
+
+
+class RequestsSession(BaseUrlSession):
+    """
+    A `requests.Session` providing:
+    - a base URL to combine all request URLs with using `urllib.parse.urljoin`;
+    - disabled SSL verification by default;
+    - customizable User-Agent header with a few commonly used configurations provided;
+    - round-robin and per-request connections to avoid HTTP stream recovery in network analysis tools.
+
+    :param base_url:
+        The base URL to use for all requests.
+    :param round_robin_conns:
+        Number of connections to use in round-robin mode,
+        1 can be specified to disable round-robin.
+        Note that either round-robin or per-request connections can be used,
+        but not both at the same time.
+    :param per_request_conn:
+        Whether to use per-request connections,
+        which automatically close after the request has completed.
+        The "Connection" header is set to None on the session instance,
+        meaning it will not be sent. If instead "close" should be sent,
+        override the "Connection" header on the headers property manually.
+    :param user_agent:
+        Callable returning an optional string which will be
+        used for all requests made to set a user agent string.
+        Some common configurations are provided through the UserAgent class.
+    """
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        round_robin_conns: Optional[int] = None,
+        per_request_conns: Optional[bool] = None,
+        user_agent: Optional[Callable[[], Optional[str]]] = None,
+    ):
+        super().__init__(base_url=base_url)
+
+        if per_request_conns is None:
+            if sploitcfg.session_per_request_conns == default:
+                per_request_conns = False
+            else:
+                per_request_conns = sploitcfg.session_per_request_conns
+
+        # per-request is disabled by default, so round-robin should be enabled by default
+        if round_robin_conns is None and not per_request_conns:
+            if sploitcfg.session_round_robin_conns == default:
+                round_robin_conns = random.randint(2, 3)
+            else:
+                round_robin_conns = sploitcfg.session_round_robin_conns
+
+        if user_agent is None:
+            if sploitcfg.session_user_agent == default:
+                user_agent = UserAgent.default
+            else:
+                user_agent = sploitcfg.session_user_agent
+
+        self.verify = False
+        self.round_robin_conns = round_robin_conns
+        self.per_request_conns = per_request_conns
+        self.user_agent = user_agent
+
+        if round_robin_conns and round_robin_conns > 1:
+            self.mount(
+                "https://", RoundRobinRequestAdapter(pool_maxsize=round_robin_conns)
+            )
+            self.mount(
+                "http://", RoundRobinRequestAdapter(pool_maxsize=round_robin_conns)
+            )
+        elif per_request_conns:
+            self.mount("https://", PerRequestAdapter())
+            self.mount("http://", PerRequestAdapter())
+            self.headers["Connection"] = None
+
+    def prepare_request(self, request: requests.Request, *args, **kwargs):
+        """
+        Prepare the request, generating the complete URL and setting the User-Agent header.
+        """
+
+        request.headers["User-Agent"] = self.user_agent()
+        return super().prepare_request(request, *args, **kwargs)
+
+
+class CacheProxySession(requests.Session):
+    """
+    A `requests.Session` which sends all HTTP and HTTPS requests
+    through the `S4DFarm` cacheproxy in order to cache the responses.
+    Note that currently caching is performed by URL, so all requests
+    to the same URL should result in similar responses,
+    i.e. not depend on cookies and other parameters.
+
+    :param proxy_url: URL of the cacheproxy instance.
+    :param auth_key: Authorization key for the cacheproxy.
+    :param duration: Caching duration specified as Go's `time.Duration` string representation.
+    """
+
+    def __init__(
+        self,
+        proxy_url: Optional[str] = None,
+        auth_key: Optional[str] = None,
+        duration: Optional[str] = None,
+    ):
+        super().__init__()
+
+        if proxy_url is None:
+            if sploitcfg.cache_proxy_url is None:
+                raise ValueError(
+                    "proxy_url is None and sploitcfg.cache_proxy_url is None too, at least one must be set"
+                )
+
+            proxy_url = sploitcfg.cache_proxy_url
+
+        if auth_key is None:
+            if sploitcfg.cache_auth_key is None:
+                raise ValueError(
+                    "auth_key is None and sploitcfg.cache_auth_key is None too, at least one must be set"
+                )
+
+            auth_key = sploitcfg.cache_auth_key
+
+        if duration is None:
+            if sploitcfg.cache_duration is None:
+                raise ValueError(
+                    "duration is None and sploitcfg.cache_duration is None too, at least one must be set"
+                )
+
+            duration = sploitcfg.cache_duration
+
+        self.headers = {
+            "X-Cache-Auth-Key": auth_key,
+            "X-Cache-Duration": duration,
+        }
+
+        self.proxies = {
+            "http": proxy_url,
+            "https": proxy_url,
+        }
+
+        self.verify = False
+
+
+class PerRequestAdapter(HTTPAdapter):
+    """
+    Overridden `HTTPAdapter` that users a `urllib3.PoolManager` with
+    our custom connection pools, which always close the returned connections.
+    Automatic closing doesn't work with proxies (for now?).
+    """
+
+    def init_poolmanager(
+        self, connections, maxsize, block=DEFAULT_POOLBLOCK, **pool_kwargs
+    ):
+        self.poolmanager = PoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            strict=True,
+            **pool_kwargs,
+        )
+
+        self.poolmanager.pool_classes_by_scheme = {
+            "http": PerRequestHTTPPool,
+            "https": PerRequestHTTPSPool,
+        }
+
+
+class PerRequestHTTPPool(HTTPConnectionPool):
+    def _put_conn(self, conn):
+        if conn:
+            conn.close()
+
+
+class PerRequestHTTPSPool(HTTPSConnectionPool):
+    def _put_conn(self, conn):
+        if conn:
+            conn.close()
+
+
+class RoundRobinRequestAdapter(HTTPAdapter):
+    """
+    Overridden `HTTPAdapter` that users a `urllib3.PoolManager` with
+    our custom connection pools, which use a FIFO queue instead of the default LIFO queue
+    for a not completely fair round-robin connection distribution.
+    """
+
+    def init_poolmanager(
+        self, connections, maxsize, block=DEFAULT_POOLBLOCK, **pool_kwargs
+    ):
+        self.poolmanager = PoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            **pool_kwargs,
+        )
+
+        self.poolmanager.pool_classes_by_scheme = {
+            "http": RoundRobinHTTPPool,
+            "https": RoundRobinHTTPSPool,
+        }
+
+
+class RoundRobinHTTPPool(HTTPConnectionPool):
+    QueueCls = queue.Queue
+
+
+class RoundRobinHTTPSPool(HTTPSConnectionPool):
+    QueueCls = queue.Queue
+
+
+def rstnofin():
+    import socket
+    import ssl
+    import struct
+
+    ORIGINAL_SOCKET = socket.socket
+
+    class GigaSocket(ORIGINAL_SOCKET):
+        def close(self):
+            print("[!] GigaSocket:close")
+            self.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+            )
+            super().close()
+
+    class GigaSSLSocket(ssl.SSLSocket):
+        def close(self):
+            print("[!] GigaSSLSocket:close")
+            self.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+            )
+            super().close()
+
+    socket.socket = GigaSocket
+    ssl.SSLContext.sslsocket_class = GigaSSLSocket
